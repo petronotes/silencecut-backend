@@ -1,4 +1,4 @@
-"""SilenceCut Backend тАФ FastAPI + FFmpeg"""
+"""SilenceCut Backend — FastAPI + FFmpeg"""
 import os, uuid, asyncio, shutil, subprocess, json, time
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException
@@ -32,7 +32,7 @@ def root():
 @app.get("/health")
 def health():
     ffmpeg_path = shutil.which("ffmpeg")
-    return {"status": "ok", "ffmpeg": ffmpeg_path is not None, "ffmpeg_path": ffmpeg_path or "not found"}
+    return {"status": "ok", "ffmpeg": ffmpeg_path is not None}
 
 
 @app.post("/process")
@@ -53,10 +53,11 @@ async def process_video(
     with open(input_path, "wb") as fo:
         shutil.copyfileobj(file.file, fo)
     tasks[task_id] = {
-        "status": "processing", "progress": 0, "log": "╨д╨░╨╣╨╗ ╨┐╨╛╨╗╤Г╤З╨╡╨╜тАж",
+        "status": "processing", "progress": 0, "log": "Файл получен…",
         "created": time.time(), "input_path": str(input_path),
         "task_dir": str(task_dir),
-        "params": {"threshold": threshold, "min_silence": min_silence, "pad": pad, "max_keep": max_keep},
+        "params": {"threshold": threshold, "min_silence": min_silence,
+                   "pad": pad, "max_keep": max_keep},
     }
     background_tasks.add_task(run_processing, task_id)
     return {"task_id": task_id}
@@ -137,59 +138,66 @@ def build_loud(silence, total, pad, max_keep):
     return [tuple(s) for s in merged if s[1] - s[0] > 0.05]
 
 
-def remux_to_rawvideo(input_path: Path, work_dir: Path) -> Path:
+def normalize_input(input_path: Path, work_dir: Path, task_id: str) -> Path:
     """
-    Step 1: ╨Я╨╛╨╗╨╜╨╛╨╡ ╨┐╨╡╤А╨╡╨║╨╛╨┤╨╕╤А╨╛╨▓╨░╨╜╨╕╨╡ ╨▓ yuv420p + pcm_s16le (╨▒╨╡╨╖ ╤Б╨╢╨░╤В╨╕╤П).
-    ╨н╤В╨╛ ╤А╨╡╤И╨░╨╡╤В ╨Т╨б╨Х ╨┐╤А╨╛╨▒╨╗╨╡╨╝╤Л ╤Б Android h264/avc1:
-    - ╨▒╨╕╤В╤Л╨╣ PTS
-    - VBR / VFR
-    - ╨╜╨╡╤З╤С╤В╨╜╤Л╨╡ ╤А╨░╨╖╨╝╨╡╤А╤Л
-    - rotation metadata
-    - avc1 vs H.264 Annex B
-    ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╨╝ .mkv тАФ ╨╛╨╜ ╨┐╨╛╨┤╨┤╨╡╤А╨╢╨╕╨▓╨░╨╡╤В ╨╗╤О╨▒╤Л╨╡ ╨║╨╛╨┤╨╡╨║╨╕ ╨▒╨╡╨╖ ╨╛╨│╤А╨░╨╜╨╕╤З╨╡╨╜╨╕╨╣ mp4.
+    Шаг 1: перекодировать в rawvideo + pcm_s16le в AVI.
+    AVI не имеет ограничений на кодеки и PTS, trim на нём работает идеально.
+    rawvideo = несжатые кадры, никаких проблем с декодером при trim.
     """
-    raw_path = work_dir / "raw.mkv"
+    raw_path = work_dir / "raw.avi"
     cmd = [
         "ffmpeg", "-y",
-        "-fflags", "+genpts+igndts",   # ╨╕╨│╨╜╨╛╤А╨╕╤А╨╛╨▓╨░╤В╤М ╨┐╨╗╨╛╤Е╨╕╨╡ DTS, ╨│╨╡╨╜╨╡╤А╨╕╤А╨╛╨▓╨░╤В╤М PTS
+        "-fflags", "+genpts+igndts",
         "-i", str(input_path),
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # ╤З╤С╤В╨╜╤Л╨╡ ╤А╨░╨╖╨╝╨╡╤А╤Л
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",  # ╨▒╤Л╤Б╤В╤А╨╛╨╡, ╨┐╨╛╤З╤В╨╕ ╨▒╨╡╨╖ ╨┐╨╛╤В╨╡╤А╤М
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "rawvideo",          # несжатое видео — trim всегда работает
         "-pix_fmt", "yuv420p",
-        "-r", "30",                    # CFR 30fps тАФ ╤Г╨▒╨╕╨▓╨░╨╡╤В VFR
-        "-c:a", "pcm_s16le",          # ╨╜╨╡╤Б╨╢╨░╤В╨╛╨╡ ╨░╤Г╨┤╨╕╨╛ тАФ ╨╝╨░╨║╤Б╨╕╨╝╨░╨╗╤М╨╜╨░╤П ╤Б╨╛╨▓╨╝╨╡╤Б╤В╨╕╨╝╨╛╤Б╤В╤М
-        "-vsync", "cfr",              # ╤Д╨╛╤А╤Б╨╕╤А╨╛╨▓╨░╤В╤М ╨┐╨╛╤Б╤В╨╛╤П╨╜╨╜╤Л╨╣ FPS
-        "-async", "1",               # ╤Б╨╕╨╜╤Е╤А╨╛╨╜╨╕╨╖╨╕╤А╨╛╨▓╨░╤В╤М ╨░╤Г╨┤╨╕╨╛
+        "-r", "30",
+        "-c:a", "pcm_s16le",         # несжатое аудио
+        "-vsync", "cfr",
         str(raw_path),
     ]
-    run_cmd(cmd, timeout=600)
+    run_cmd(cmd, timeout=900)
     return raw_path
 
 
-def cut_segments(raw_path: Path, segs, output_path: Path):
+def cut_to_segments(raw_path: Path, segs, work_dir: Path, task_id: str) -> list:
     """
-    Step 2: ╨а╨╡╨╖╨░╤В╤М ╨╕ ╤Б╨║╨╗╨╡╨╕╨▓╨░╤В╤М ╤Г╨╢╨╡ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨╛╨▓╨░╨╜╨╜╤Л╨╣ ╤Д╨░╨╣╨╗.
-    ╨в╨╡╨┐╨╡╤А╤М trim ╤А╨░╨▒╨╛╤В╨░╨╡╤В ╨║╨╛╤А╤А╨╡╨║╤В╨╜╨╛ тАФ ╨┤╨░╨╜╨╜╤Л╨╡ ╤Г╨╢╨╡ CFR + ╤З╨╕╤Б╤В╤Л╨╣ PTS.
+    Шаг 2: вырезать каждый сегмент отдельным ffmpeg-вызовом через -ss/-to.
+    Это самый надёжный способ — каждый вызов независим, нет filter_complex.
     """
-    n = len(segs)
-    pv = [
-        f"[0:v]trim=start={s:.4f}:end={e:.4f},setpts=PTS-STARTPTS[v{i}]"
-        for i, (s, e) in enumerate(segs)
-    ]
-    pa = [
-        f"[0:a]atrim=start={s:.4f}:end={e:.4f},asetpts=PTS-STARTPTS[a{i}]"
-        for i, (s, e) in enumerate(segs)
-    ]
-    inputs_v = "".join(f"[v{i}]" for i in range(n))
-    inputs_a = "".join(f"[a{i}]" for i in range(n))
-    cat = f"{inputs_v}concat=n={n}:v=1:a=0[outv];{inputs_a}concat=n={n}:v=0:a=1[outa]"
-    fc = ";".join(pv + pa + [cat])
+    seg_paths = []
+    for i, (start, end) in enumerate(segs):
+        seg_path = work_dir / f"seg_{i:04d}.avi"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(raw_path),
+            "-ss", f"{start:.4f}",
+            "-to", f"{end:.4f}",
+            "-c", "copy",            # просто копируем — rawvideo всегда seekable
+            str(seg_path),
+        ]
+        run_cmd(cmd, timeout=300)
+        seg_paths.append(seg_path)
+    return seg_paths
+
+
+def concat_segments(seg_paths: list, work_dir: Path, output_path: Path):
+    """
+    Шаг 3: склеить через concat demuxer (список файлов) и закодировать в MP4.
+    concat demuxer не требует filter_complex и работает с любыми форматами.
+    """
+    # Записываем список сегментов
+    list_path = work_dir / "segments.txt"
+    with open(list_path, "w") as f:
+        for p in seg_paths:
+            f.write(f"file '{p}'\n")
 
     cmd = [
         "ffmpeg", "-y",
-        "-i", str(raw_path),
-        "-filter_complex", fc,
-        "-map", "[outv]", "-map", "[outa]",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(list_path),
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
@@ -203,33 +211,36 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
     t = tasks[task_id]
     work_dir = input_path.parent
 
-    # STEP 1 тАФ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╤П (╨╕╤Б╨┐╤А╨░╨▓╨╗╤П╨╡╤В ╨▓╤Б╨╡ Android-╨┐╤А╨╛╨▒╨╗╨╡╨╝╤Л)
-    t.update({"log": "╨Э╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╤П ╨▓╨╕╨┤╨╡╨╛ (Android fix)тАж", "progress": 10})
-    raw_path = remux_to_rawvideo(input_path, work_dir)
+    # ШАГ 1 — нормализация в rawvideo AVI
+    t.update({"log": "Нормализация видео…", "progress": 5})
+    raw_path = normalize_input(input_path, work_dir, task_id)
 
-    # STEP 2 тАФ ╨░╨╜╨░╨╗╨╕╨╖ ╤В╨╕╤И╨╕╨╜╤Л ╨╜╨░ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨╛╨▓╨░╨╜╨╜╨╛╨╝ ╤Д╨░╨╣╨╗╨╡
-    t.update({"log": "╨Р╨╜╨░╨╗╨╕╨╖ ╨░╤Г╨┤╨╕╨╛тАж", "progress": 35})
+    # ШАГ 2 — анализ тишины
+    t.update({"log": "Анализ аудио…", "progress": 30})
     silence, total = detect_silence(raw_path, params["threshold"], params["min_silence"])
-    t.update({"log": f"╨Э╨░╨╣╨┤╨╡╨╜╨╛ ╨┐╨░╤Г╨╖: {len(silence)}", "progress": 50})
+    t.update({"log": f"Найдено пауз: {len(silence)}", "progress": 45})
 
     segs = build_loud(silence, total, params["pad"], params["max_keep"])
-    t.update({"log": f"╨б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓ ╨║ ╤Б╨╛╤Е╤А╨░╨╜╨╡╨╜╨╕╤О: {len(segs)}", "progress": 60})
-
     if not segs:
-        raise RuntimeError("╨Э╨╡╤В ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓. ╨Я╨╛╨┐╤А╨╛╨▒╤Г╨╣ ╤Б╨╜╨╕╨╖╨╕╤В╤М ╨┐╨╛╤А╨╛╨│ ╨│╤А╨╛╨╝╨║╨╛╤Б╤В╨╕.")
-
+        raise RuntimeError("Нет активных сегментов. Попробуй снизить порог громкости.")
     out_dur = sum(e - s for s, e in segs)
+    t.update({"log": f"Сегментов: {len(segs)}, вырезаю…", "progress": 50})
 
-    # STEP 3 тАФ ╨╝╨╛╨╜╤В╨░╨╢
-    t.update({"log": "╨Ь╨╛╨╜╤В╨░╨╢ тЖТ MP4тАж", "progress": 65})
-    cut_segments(raw_path, segs, output_path)
+    # ШАГ 3 — вырезаем каждый сегмент
+    seg_paths = cut_to_segments(raw_path, segs, work_dir, task_id)
+    t.update({"log": "Склейка → MP4…", "progress": 75})
 
-    # ╨г╨┤╨░╨╗╤П╨╡╨╝ ╨┐╤А╨╛╨╝╨╡╨╢╤Г╤В╨╛╤З╨╜╤Л╨╣ ╤Д╨░╨╣╨╗
+    # ШАГ 4 — склейка и финальное кодирование
+    concat_segments(seg_paths, work_dir, output_path)
+
+    # Чистим временные файлы
     raw_path.unlink(missing_ok=True)
+    for p in seg_paths:
+        p.unlink(missing_ok=True)
 
     removed = total - out_dur
     t.update({
-        "status": "done", "progress": 100, "log": "╨У╨╛╤В╨╛╨▓╨╛!",
+        "status": "done", "progress": 100, "log": "Готово!",
         "original_duration": total, "output_duration": out_dur,
         "removed_sec": removed,
         "removed_pct": removed / total * 100 if total > 0 else 0,
