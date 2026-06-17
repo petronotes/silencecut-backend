@@ -5,7 +5,7 @@ from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPExcept
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="SilenceCut API", version="1.0.0")
+app = FastAPI(title="SilenceCut API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -83,7 +83,7 @@ async def run_processing(task_id: str):
 def run_cmd(cmd, timeout=600):
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr[-1200:])
+        raise RuntimeError(proc.stderr[-2000:])
     return proc
 
 
@@ -138,105 +138,77 @@ def build_loud(silence, total, pad, max_keep):
     return [tuple(s) for s in merged if s[1] - s[0] > 0.05]
 
 
-def normalize_input(input_path: Path, work_dir: Path, task_id: str) -> Path:
-    """
-    Шаг 1: перекодировать в rawvideo + pcm_s16le в AVI.
-    AVI не имеет ограничений на кодеки и PTS, trim на нём работает идеально.
-    rawvideo = несжатые кадры, никаких проблем с декодером при trim.
-    """
-    raw_path = work_dir / "raw.avi"
-    cmd = [
-        "ffmpeg", "-y",
-        "-fflags", "+genpts+igndts",
-        "-i", str(input_path),
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v", "rawvideo",          # несжатое видео — trim всегда работает
-        "-pix_fmt", "yuv420p",
-        "-r", "30",
-        "-c:a", "pcm_s16le",         # несжатое аудио
-        "-vsync", "cfr",
-        str(raw_path),
-    ]
-    run_cmd(cmd, timeout=900)
-    return raw_path
+def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, params: dict):
+    t = tasks[task_id]
+    work_dir = input_path.parent
 
+    # ШАГ 1 — определяем тишину прямо на оригинальном файле
+    t.update({"log": "Анализ аудио…", "progress": 10})
+    silence, total = detect_silence(input_path, params["threshold"], params["min_silence"])
+    t.update({"log": f"Найдено пауз: {len(silence)}", "progress": 25})
 
-def cut_to_segments(raw_path: Path, segs, work_dir: Path, task_id: str) -> list:
-    """
-    Шаг 2: вырезать каждый сегмент отдельным ffmpeg-вызовом через -ss/-to.
-    Это самый надёжный способ — каждый вызов независим, нет filter_complex.
-    """
+    segs = build_loud(silence, total, params["pad"], params["max_keep"])
+    if not segs:
+        raise RuntimeError("Нет активных сегментов. Попробуй снизить порог громкости.")
+
+    out_dur = sum(e - s for s, e in segs)
+    t.update({"log": f"Сегментов: {len(segs)}, кодирую…", "progress": 30})
+
+    # ШАГ 2 — каждый сегмент кодируем СРАЗУ в H264 MP4
+    # Используем -ss ПЕРЕД -i (input seeking) — точный и быстрый,
+    # работает с любым входным форматом включая Samsung avc1.
+    # -avoid_negative_ts make_zero исправляет PTS в сегментах.
     seg_paths = []
+    n = len(segs)
     for i, (start, end) in enumerate(segs):
-        seg_path = work_dir / f"seg_{i:04d}.avi"
+        seg_path = work_dir / f"seg_{i:04d}.mp4"
+        dur = end - start
         cmd = [
             "ffmpeg", "-y",
-            "-i", str(raw_path),
-            "-ss", f"{start:.4f}",
-            "-to", f"{end:.4f}",
-            "-c", "copy",            # просто копируем — rawvideo всегда seekable
+            "-ss", f"{start:.4f}",          # input seek (быстрый, перед -i)
+            "-i", str(input_path),
+            "-t", f"{dur:.4f}",             # длительность сегмента
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-r", "30",                     # принудительный CFR
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "48000",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
             str(seg_path),
         ]
         run_cmd(cmd, timeout=300)
         seg_paths.append(seg_path)
-    return seg_paths
+        progress = 30 + int((i + 1) / n * 55)
+        t.update({"log": f"Кодирую сегмент {i+1}/{n}…", "progress": progress})
 
+    t.update({"log": "Склейка сегментов…", "progress": 87})
 
-def concat_segments(seg_paths: list, work_dir: Path, output_path: Path):
-    """
-    Шаг 3: склеить через concat demuxer (список файлов) и закодировать в MP4.
-    concat demuxer не требует filter_complex и работает с любыми форматами.
-    """
-    # Записываем список сегментов
+    # ШАГ 3 — склейка через concat demuxer
+    # Все сегменты уже H264 MP4 с одинаковыми параметрами → просто copy
     list_path = work_dir / "segments.txt"
     with open(list_path, "w") as f:
         for p in seg_paths:
-            f.write(f"file '{p}'\n")
+            f.write(f"file \'{p}\'\n")
 
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_path),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c", "copy",                       # без перекодирования — уже H264
         "-movflags", "+faststart",
         str(output_path),
     ]
-    run_cmd(cmd, timeout=600)
+    run_cmd(cmd, timeout=300)
 
-
-def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, params: dict):
-    t = tasks[task_id]
-    work_dir = input_path.parent
-
-    # ШАГ 1 — нормализация в rawvideo AVI
-    t.update({"log": "Нормализация видео…", "progress": 5})
-    raw_path = normalize_input(input_path, work_dir, task_id)
-
-    # ШАГ 2 — анализ тишины
-    t.update({"log": "Анализ аудио…", "progress": 30})
-    silence, total = detect_silence(raw_path, params["threshold"], params["min_silence"])
-    t.update({"log": f"Найдено пауз: {len(silence)}", "progress": 45})
-
-    segs = build_loud(silence, total, params["pad"], params["max_keep"])
-    if not segs:
-        raise RuntimeError("Нет активных сегментов. Попробуй снизить порог громкости.")
-    out_dur = sum(e - s for s, e in segs)
-    t.update({"log": f"Сегментов: {len(segs)}, вырезаю…", "progress": 50})
-
-    # ШАГ 3 — вырезаем каждый сегмент
-    seg_paths = cut_to_segments(raw_path, segs, work_dir, task_id)
-    t.update({"log": "Склейка → MP4…", "progress": 75})
-
-    # ШАГ 4 — склейка и финальное кодирование
-    concat_segments(seg_paths, work_dir, output_path)
-
-    # Чистим временные файлы
-    raw_path.unlink(missing_ok=True)
+    # Чистим сегменты
     for p in seg_paths:
         p.unlink(missing_ok=True)
+    list_path.unlink(missing_ok=True)
 
     removed = total - out_dur
     t.update({
@@ -246,6 +218,54 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
         "removed_pct": removed / total * 100 if total > 0 else 0,
         "output_path": str(output_path),
     })
+
+
+@app.post("/analyze")
+async def analyze_video(
+    file: UploadFile = File(...),
+    threshold: float = Form(-40.0),
+    min_silence: float = Form(0.5),
+):
+    task_id = str(uuid.uuid4())
+    task_dir = WORK_DIR / task_id
+    task_dir.mkdir(parents=True)
+    ext = Path(file.filename).suffix.lower() or ".mp4"
+    input_path = task_dir / ("input" + ext)
+    with open(input_path, "wb") as fo:
+        shutil.copyfileobj(file.file, fo)
+    try:
+        total = get_duration(input_path)
+        silence, _ = detect_silence(input_path, threshold, min_silence)
+
+        # Waveform: RMS per ~50ms window via astats
+        cmd = [
+            "ffmpeg", "-i", str(input_path),
+            "-af", "asetnsamples=n=2400,astats=metadata=1:reset=1",
+            "-f", "null", "-",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        rms_values = []
+        for line in r.stderr.split("\n"):
+            if "RMS level dB" in line:
+                try:
+                    val = float(line.split(":")[-1].strip())
+                    val = max(-60.0, min(0.0, val))
+                    rms_values.append(round((val + 60) / 60, 4))
+                except:
+                    pass
+
+        if len(rms_values) > 800:
+            step = len(rms_values) / 800
+            rms_values = [rms_values[int(i * step)] for i in range(800)]
+
+        return {
+            "duration": total,
+            "waveform": rms_values,
+            "silence": [{"start": s, "end": e} for s, e in silence],
+            "window_size": total / len(rms_values) if rms_values else 0,
+        }
+    finally:
+        shutil.rmtree(task_dir, ignore_errors=True)
 
 
 @app.get("/status/{task_id}")
