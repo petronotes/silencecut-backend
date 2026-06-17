@@ -7,10 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="SilenceCut API", version="1.0.0")
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 WORK_DIR = Path("/tmp/silencecut")
@@ -35,11 +32,7 @@ def root():
 @app.get("/health")
 def health():
     ffmpeg_path = shutil.which("ffmpeg")
-    return {
-        "status": "ok",
-        "ffmpeg": ffmpeg_path is not None,
-        "ffmpeg_path": ffmpeg_path or "not found",
-    }
+    return {"status": "ok", "ffmpeg": ffmpeg_path is not None, "ffmpeg_path": ffmpeg_path or "not found"}
 
 
 @app.post("/process")
@@ -63,10 +56,7 @@ async def process_video(
         "status": "processing", "progress": 0, "log": "╨д╨░╨╣╨╗ ╨┐╨╛╨╗╤Г╤З╨╡╨╜тАж",
         "created": time.time(), "input_path": str(input_path),
         "task_dir": str(task_dir),
-        "params": {
-            "threshold": threshold, "min_silence": min_silence,
-            "pad": pad, "max_keep": max_keep,
-        },
+        "params": {"threshold": threshold, "min_silence": min_silence, "pad": pad, "max_keep": max_keep},
     }
     background_tasks.add_task(run_processing, task_id)
     return {"task_id": task_id}
@@ -81,14 +71,19 @@ async def run_processing(task_id: str):
         await loop.run_in_executor(
             None,
             lambda: process_with_ffmpeg(
-                task_id,
-                Path(t["input_path"]),
-                Path(t["task_dir"]) / "output.mp4",
-                t["params"],
+                task_id, Path(t["input_path"]),
+                Path(t["task_dir"]) / "output.mp4", t["params"],
             ),
         )
     except Exception as e:
         tasks[task_id].update({"status": "error", "detail": str(e)})
+
+
+def run_cmd(cmd, timeout=600):
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr[-1200:])
+    return proc
 
 
 def get_duration(path: Path) -> float:
@@ -99,57 +94,24 @@ def get_duration(path: Path) -> float:
     return float(json.loads(r.stdout)["format"]["duration"])
 
 
-def probe_streams(path: Path) -> dict:
-    """Return info about video/audio streams."""
-    r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
-         "-show_streams", "-show_format", str(path)],
-        capture_output=True, text=True, timeout=30,
-    )
-    data = json.loads(r.stdout)
-    streams = data.get("streams", [])
-    has_video = any(s.get("codec_type") == "video" for s in streams)
-    has_audio = any(s.get("codec_type") == "audio" for s in streams)
-    duration = float(data.get("format", {}).get("duration", 0))
-    # detect rotation (Android vertical video)
-    rotation = 0
-    for s in streams:
-        if s.get("codec_type") == "video":
-            # Check side_data_list for rotation
-            for sd in s.get("side_data_list", []):
-                if "rotation" in sd:
-                    rotation = abs(int(sd["rotation"]))
-            # Also check tags
-            tags = s.get("tags", {})
-            if "rotate" in tags:
-                rotation = abs(int(tags["rotate"]))
-    return {"has_video": has_video, "has_audio": has_audio,
-            "duration": duration, "rotation": rotation}
-
-
-def detect_silence(input_path: Path, threshold: float, min_silence: float):
-    cmd = [
-        "ffmpeg", "-i", str(input_path),
-        "-af", f"silencedetect=noise={threshold}dB:duration={min_silence}",
-        "-f", "null", "-",
-    ]
+def detect_silence(path: Path, threshold: float, min_silence: float):
+    cmd = ["ffmpeg", "-i", str(path),
+           "-af", f"silencedetect=noise={threshold}dB:duration={min_silence}",
+           "-f", "null", "-"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    total = get_duration(input_path)
+    total = get_duration(path)
     silence, cur_start = [], None
     for line in r.stderr.split("\n"):
         if "silence_start:" in line:
-            try:
-                cur_start = float(line.split("silence_start:")[-1].strip().split()[0])
-            except Exception:
-                pass
+            try: cur_start = float(line.split("silence_start:")[-1].strip().split()[0])
+            except: pass
         elif "silence_end:" in line:
             try:
                 end = float(line.split("silence_end:")[-1].strip().split()[0])
                 if cur_start is not None:
                     silence.append((cur_start, end))
                     cur_start = None
-            except Exception:
-                pass
+            except: pass
     if cur_start is not None:
         silence.append((cur_start, total))
     return silence, total
@@ -175,120 +137,95 @@ def build_loud(silence, total, pad, max_keep):
     return [tuple(s) for s in merged if s[1] - s[0] > 0.05]
 
 
-def build_filter(segs, has_video: bool, has_audio: bool, rotation: int) -> tuple:
+def remux_to_rawvideo(input_path: Path, work_dir: Path) -> Path:
     """
-    Build filter_complex + map args.
-    Fixes Android h264/avc1 issues:
-      - force decode via scale filter (flushes decoder)
-      - handle rotation via transpose
-      - audio-only fallback if no video stream
+    Step 1: ╨Я╨╛╨╗╨╜╨╛╨╡ ╨┐╨╡╤А╨╡╨║╨╛╨┤╨╕╤А╨╛╨▓╨░╨╜╨╕╨╡ ╨▓ yuv420p + pcm_s16le (╨▒╨╡╨╖ ╤Б╨╢╨░╤В╨╕╤П).
+    ╨н╤В╨╛ ╤А╨╡╤И╨░╨╡╤В ╨Т╨б╨Х ╨┐╤А╨╛╨▒╨╗╨╡╨╝╤Л ╤Б Android h264/avc1:
+    - ╨▒╨╕╤В╤Л╨╣ PTS
+    - VBR / VFR
+    - ╨╜╨╡╤З╤С╤В╨╜╤Л╨╡ ╤А╨░╨╖╨╝╨╡╤А╤Л
+    - rotation metadata
+    - avc1 vs H.264 Annex B
+    ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╨╝ .mkv тАФ ╨╛╨╜ ╨┐╨╛╨┤╨┤╨╡╤А╨╢╨╕╨▓╨░╨╡╤В ╨╗╤О╨▒╤Л╨╡ ╨║╨╛╨┤╨╡╨║╨╕ ╨▒╨╡╨╖ ╨╛╨│╤А╨░╨╜╨╕╤З╨╡╨╜╨╕╨╣ mp4.
+    """
+    raw_path = work_dir / "raw.mkv"
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts+igndts",   # ╨╕╨│╨╜╨╛╤А╨╕╤А╨╛╨▓╨░╤В╤М ╨┐╨╗╨╛╤Е╨╕╨╡ DTS, ╨│╨╡╨╜╨╡╤А╨╕╤А╨╛╨▓╨░╤В╤М PTS
+        "-i", str(input_path),
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # ╤З╤С╤В╨╜╤Л╨╡ ╤А╨░╨╖╨╝╨╡╤А╤Л
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",  # ╨▒╤Л╤Б╤В╤А╨╛╨╡, ╨┐╨╛╤З╤В╨╕ ╨▒╨╡╨╖ ╨┐╨╛╤В╨╡╤А╤М
+        "-pix_fmt", "yuv420p",
+        "-r", "30",                    # CFR 30fps тАФ ╤Г╨▒╨╕╨▓╨░╨╡╤В VFR
+        "-c:a", "pcm_s16le",          # ╨╜╨╡╤Б╨╢╨░╤В╨╛╨╡ ╨░╤Г╨┤╨╕╨╛ тАФ ╨╝╨░╨║╤Б╨╕╨╝╨░╨╗╤М╨╜╨░╤П ╤Б╨╛╨▓╨╝╨╡╤Б╤В╨╕╨╝╨╛╤Б╤В╤М
+        "-vsync", "cfr",              # ╤Д╨╛╤А╤Б╨╕╤А╨╛╨▓╨░╤В╤М ╨┐╨╛╤Б╤В╨╛╤П╨╜╨╜╤Л╨╣ FPS
+        "-async", "1",               # ╤Б╨╕╨╜╤Е╤А╨╛╨╜╨╕╨╖╨╕╤А╨╛╨▓╨░╤В╤М ╨░╤Г╨┤╨╕╨╛
+        str(raw_path),
+    ]
+    run_cmd(cmd, timeout=600)
+    return raw_path
+
+
+def cut_segments(raw_path: Path, segs, output_path: Path):
+    """
+    Step 2: ╨а╨╡╨╖╨░╤В╤М ╨╕ ╤Б╨║╨╗╨╡╨╕╨▓╨░╤В╤М ╤Г╨╢╨╡ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨╛╨▓╨░╨╜╨╜╤Л╨╣ ╤Д╨░╨╣╨╗.
+    ╨в╨╡╨┐╨╡╤А╤М trim ╤А╨░╨▒╨╛╤В╨░╨╡╤В ╨║╨╛╤А╤А╨╡╨║╤В╨╜╨╛ тАФ ╨┤╨░╨╜╨╜╤Л╨╡ ╤Г╨╢╨╡ CFR + ╤З╨╕╤Б╤В╤Л╨╣ PTS.
     """
     n = len(segs)
+    pv = [
+        f"[0:v]trim=start={s:.4f}:end={e:.4f},setpts=PTS-STARTPTS[v{i}]"
+        for i, (s, e) in enumerate(segs)
+    ]
+    pa = [
+        f"[0:a]atrim=start={s:.4f}:end={e:.4f},asetpts=PTS-STARTPTS[a{i}]"
+        for i, (s, e) in enumerate(segs)
+    ]
+    inputs_v = "".join(f"[v{i}]" for i in range(n))
+    inputs_a = "".join(f"[a{i}]" for i in range(n))
+    cat = f"{inputs_v}concat=n={n}:v=1:a=0[outv];{inputs_a}concat=n={n}:v=0:a=1[outa]"
+    fc = ";".join(pv + pa + [cat])
 
-    if has_video and has_audio:
-        # Video filter: decode fully, handle rotation, trim, concat
-        # scale=trunc(iw/2)*2:trunc(ih/2)*2 ensures even dimensions (required by libx264)
-        # fps=fps=source forces constant framerate тАФ fixes frame=0 on Android VBR
-        rot_filter = ""
-        if rotation == 90:
-            rot_filter = ",transpose=1"
-        elif rotation == 180:
-            rot_filter = ",transpose=1,transpose=1"
-        elif rotation == 270:
-            rot_filter = ",transpose=2"
-
-        pv = [
-            f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2{rot_filter},"
-            f"fps=fps=30,trim=start={s:.4f}:end={e:.4f},setpts=PTS-STARTPTS[v{i}]"
-            for i, (s, e) in enumerate(segs)
-        ]
-        pa = [
-            f"[0:a]atrim=start={s:.4f}:end={e:.4f},asetpts=PTS-STARTPTS[a{i}]"
-            for i, (s, e) in enumerate(segs)
-        ]
-        inputs_v = "".join(f"[v{i}]" for i in range(n))
-        inputs_a = "".join(f"[a{i}]" for i in range(n))
-        cat = (f"{inputs_v}concat=n={n}:v=1:a=0[outv];"
-               f"{inputs_a}concat=n={n}:v=0:a=1[outa]")
-        fc = ";".join(pv + pa + [cat])
-        maps = ["-map", "[outv]", "-map", "[outa]"]
-
-    elif has_video and not has_audio:
-        pv = [
-            f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-            f"fps=fps=30,trim=start={s:.4f}:end={e:.4f},setpts=PTS-STARTPTS[v{i}]"
-            for i, (s, e) in enumerate(segs)
-        ]
-        inputs_v = "".join(f"[v{i}]" for i in range(n))
-        cat = f"{inputs_v}concat=n={n}:v=1:a=0[outv]"
-        fc = ";".join(pv + [cat])
-        maps = ["-map", "[outv]"]
-
-    else:
-        # Audio only
-        pa = [
-            f"[0:a]atrim=start={s:.4f}:end={e:.4f},asetpts=PTS-STARTPTS[a{i}]"
-            for i, (s, e) in enumerate(segs)
-        ]
-        inputs_a = "".join(f"[a{i}]" for i in range(n))
-        cat = f"{inputs_a}concat=n={n}:v=0:a=1[outa]"
-        fc = ";".join(pa + [cat])
-        maps = ["-map", "[outa]"]
-
-    return fc, maps
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(raw_path),
+        "-filter_complex", fc,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    run_cmd(cmd, timeout=600)
 
 
 def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, params: dict):
     t = tasks[task_id]
+    work_dir = input_path.parent
 
-    t.update({"log": "╨Ю╨┐╤А╨╡╨┤╨╡╨╗╤П╤О ╤Д╨╛╤А╨╝╨░╤В ╨▓╨╕╨┤╨╡╨╛тАж", "progress": 5})
-    info = probe_streams(input_path)
-    has_video = info["has_video"]
-    has_audio = info["has_audio"]
-    rotation = info["rotation"]
+    # STEP 1 тАФ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╤П (╨╕╤Б╨┐╤А╨░╨▓╨╗╤П╨╡╤В ╨▓╤Б╨╡ Android-╨┐╤А╨╛╨▒╨╗╨╡╨╝╤Л)
+    t.update({"log": "╨Э╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╤П ╨▓╨╕╨┤╨╡╨╛ (Android fix)тАж", "progress": 10})
+    raw_path = remux_to_rawvideo(input_path, work_dir)
 
-    if not has_audio:
-        raise RuntimeError("╨Т ╤Д╨░╨╣╨╗╨╡ ╨╜╨╡╤В ╨░╤Г╨┤╨╕╨╛╨┤╨╛╤А╨╛╨╢╨║╨╕ тАФ ╨╜╨╡╤З╨╡╨│╨╛ ╨░╨╜╨░╨╗╨╕╨╖╨╕╤А╨╛╨▓╨░╤В╤М.")
-
-    t.update({"log": "╨Р╨╜╨░╨╗╨╕╨╖ ╨░╤Г╨┤╨╕╨╛тАж", "progress": 10})
-    silence, total = detect_silence(input_path, params["threshold"], params["min_silence"])
-    t.update({"log": f"╨Э╨░╨╣╨┤╨╡╨╜╨╛ ╨┐╨░╤Г╨╖: {len(silence)}", "progress": 30})
+    # STEP 2 тАФ ╨░╨╜╨░╨╗╨╕╨╖ ╤В╨╕╤И╨╕╨╜╤Л ╨╜╨░ ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨╛╨▓╨░╨╜╨╜╨╛╨╝ ╤Д╨░╨╣╨╗╨╡
+    t.update({"log": "╨Р╨╜╨░╨╗╨╕╨╖ ╨░╤Г╨┤╨╕╨╛тАж", "progress": 35})
+    silence, total = detect_silence(raw_path, params["threshold"], params["min_silence"])
+    t.update({"log": f"╨Э╨░╨╣╨┤╨╡╨╜╨╛ ╨┐╨░╤Г╨╖: {len(silence)}", "progress": 50})
 
     segs = build_loud(silence, total, params["pad"], params["max_keep"])
-    t.update({"log": f"╨Р╨║╤В╨╕╨▓╨╜╤Л╤Е ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓: {len(segs)}", "progress": 40})
+    t.update({"log": f"╨б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓ ╨║ ╤Б╨╛╤Е╤А╨░╨╜╨╡╨╜╨╕╤О: {len(segs)}", "progress": 60})
 
     if not segs:
-        raise RuntimeError("╨Э╨╡╤В ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓. ╨б╨╜╨╕╨╖╤М ╨┐╨╛╤А╨╛╨│ ╨│╤А╨╛╨╝╨║╨╛╤Б╤В╨╕.")
+        raise RuntimeError("╨Э╨╡╤В ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓. ╨Я╨╛╨┐╤А╨╛╨▒╤Г╨╣ ╤Б╨╜╨╕╨╖╨╕╤В╤М ╨┐╨╛╤А╨╛╨│ ╨│╤А╨╛╨╝╨║╨╛╤Б╤В╨╕.")
 
     out_dur = sum(e - s for s, e in segs)
-    t.update({"log": "╨Ь╨╛╨╜╤В╨░╨╢ тЖТ MP4тАж", "progress": 50})
 
-    fc, maps = build_filter(segs, has_video, has_audio, rotation)
+    # STEP 3 тАФ ╨╝╨╛╨╜╤В╨░╨╢
+    t.update({"log": "╨Ь╨╛╨╜╤В╨░╨╢ тЖТ MP4тАж", "progress": 65})
+    cut_segments(raw_path, segs, output_path)
 
-    # Codec args
-    if has_video:
-        codec_args = [
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-pix_fmt", "yuv420p",          # ensure compatibility
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-        ]
-    else:
-        codec_args = ["-c:a", "aac", "-b:a", "128k"]
-
-    cmd = (
-        ["ffmpeg", "-y",
-         "-fflags", "+genpts",              # regenerate PTS тАФ fixes Android VBR issues
-         "-i", str(input_path),
-         "-filter_complex", fc]
-        + maps
-        + codec_args
-        + [str(output_path)]
-    )
-
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg error:\n{proc.stderr[-1000:]}")
+    # ╨г╨┤╨░╨╗╤П╨╡╨╝ ╨┐╤А╨╛╨╝╨╡╨╢╤Г╤В╨╛╤З╨╜╤Л╨╣ ╤Д╨░╨╣╨╗
+    raw_path.unlink(missing_ok=True)
 
     removed = total - out_dur
     t.update({
