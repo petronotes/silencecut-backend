@@ -1,4 +1,4 @@
-"""SilenceCut Backend — FastAPI + FFmpeg"""
+"""SilenceCut Backend тАФ FastAPI + FFmpeg"""
 import os, uuid, asyncio, shutil, subprocess, json, time
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException
@@ -53,7 +53,7 @@ async def process_video(
     with open(input_path, "wb") as fo:
         shutil.copyfileobj(file.file, fo)
     tasks[task_id] = {
-        "status": "processing", "progress": 0, "log": "Файл получен…",
+        "status": "processing", "progress": 0, "log": "╨д╨░╨╣╨╗ ╨┐╨╛╨╗╤Г╤З╨╡╨╜тАж",
         "created": time.time(), "input_path": str(input_path),
         "task_dir": str(task_dir),
         "params": {"threshold": threshold, "min_silence": min_silence,
@@ -142,22 +142,22 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
     t = tasks[task_id]
     work_dir = input_path.parent
 
-    # ШАГ 1 — определяем тишину прямо на оригинальном файле
-    t.update({"log": "Анализ аудио…", "progress": 10})
+    # ╨и╨Р╨У 1 тАФ ╨╛╨┐╤А╨╡╨┤╨╡╨╗╤П╨╡╨╝ ╤В╨╕╤И╨╕╨╜╤Г ╨┐╤А╤П╨╝╨╛ ╨╜╨░ ╨╛╤А╨╕╨│╨╕╨╜╨░╨╗╤М╨╜╨╛╨╝ ╤Д╨░╨╣╨╗╨╡
+    t.update({"log": "╨Р╨╜╨░╨╗╨╕╨╖ ╨░╤Г╨┤╨╕╨╛тАж", "progress": 10})
     silence, total = detect_silence(input_path, params["threshold"], params["min_silence"])
-    t.update({"log": f"Найдено пауз: {len(silence)}", "progress": 25})
+    t.update({"log": f"╨Э╨░╨╣╨┤╨╡╨╜╨╛ ╨┐╨░╤Г╨╖: {len(silence)}", "progress": 25})
 
     segs = build_loud(silence, total, params["pad"], params["max_keep"])
     if not segs:
-        raise RuntimeError("Нет активных сегментов. Попробуй снизить порог громкости.")
+        raise RuntimeError("╨Э╨╡╤В ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓. ╨Я╨╛╨┐╤А╨╛╨▒╤Г╨╣ ╤Б╨╜╨╕╨╖╨╕╤В╤М ╨┐╨╛╤А╨╛╨│ ╨│╤А╨╛╨╝╨║╨╛╤Б╤В╨╕.")
 
     out_dur = sum(e - s for s, e in segs)
-    t.update({"log": f"Сегментов: {len(segs)}, кодирую…", "progress": 30})
+    t.update({"log": f"╨б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓: {len(segs)}, ╨║╨╛╨┤╨╕╤А╤Г╤ОтАж", "progress": 30})
 
-    # ШАГ 2 — каждый сегмент кодируем СРАЗУ в H264 MP4
-    # Используем -ss ПЕРЕД -i (input seeking) — точный и быстрый,
-    # работает с любым входным форматом включая Samsung avc1.
-    # -avoid_negative_ts make_zero исправляет PTS в сегментах.
+    # ╨и╨Р╨У 2 тАФ ╨║╨░╨╢╨┤╤Л╨╣ ╤Б╨╡╨│╨╝╨╡╨╜╤В ╨║╨╛╨┤╨╕╤А╤Г╨╡╨╝ ╨б╨а╨Р╨Ч╨г ╨▓ H264 MP4
+    # ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╨╝ -ss ╨Я╨Х╨а╨Х╨Ф -i (input seeking) тАФ ╤В╨╛╤З╨╜╤Л╨╣ ╨╕ ╨▒╤Л╤Б╤В╤А╤Л╨╣,
+    # ╤А╨░╨▒╨╛╤В╨░╨╡╤В ╤Б ╨╗╤О╨▒╤Л╨╝ ╨▓╤Е╨╛╨┤╨╜╤Л╨╝ ╤Д╨╛╤А╨╝╨░╤В╨╛╨╝ ╨▓╨║╨╗╤О╤З╨░╤П Samsung avc1.
+    # -avoid_negative_ts make_zero ╨╕╤Б╨┐╤А╨░╨▓╨╗╤П╨╡╤В PTS ╨▓ ╤Б╨╡╨│╨╝╨╡╨╜╤В╨░╤Е.
     seg_paths = []
     n = len(segs)
     for i, (start, end) in enumerate(segs):
@@ -165,14 +165,17 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
         dur = end - start
         cmd = [
             "ffmpeg", "-y",
-            "-ss", f"{start:.4f}",          # input seek (быстрый, перед -i)
+            "-fflags", "+genpts+igndts",    # ╨┐╨╡╤А╨╡╤Б╤З╨╕╤В╨░╤В╤М ╨▒╨╕╤В╤Л╨╡ PTS/DTS Samsung
+            "-ss", f"{max(0.0, start - 2):.4f}",  # ╤З╤Г╤В╤М ╤А╨░╨╜╤М╤И╨╡ тАФ ╨│╨░╤А╨░╨╜╤В╨╕╤А╤Г╨╡╨╝ keyframe
             "-i", str(input_path),
-            "-t", f"{dur:.4f}",             # длительность сегмента
+            "-ss", f"{min(2.0, start):.4f}", # output seek тАФ ╨╛╨▒╤А╨╡╨╖╨░╨╡╨╝ ╨╗╨╕╤И╨╜╨╡╨╡ ╨╜╨░╤З╨░╨╗╨╛
+            "-t", f"{dur:.4f}",
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "23",
             "-pix_fmt", "yuv420p",
-            "-r", "30",                     # принудительный CFR
+            "-r", "30",
+            "-force_key_frames", "expr:gte(t,0)",  # IDR-╨║╨░╨┤╤А ╨▓ ╨╜╨░╤З╨░╨╗╨╡ ╨║╨░╨╢╨┤╨╛╨│╨╛ ╤Б╨╡╨│╨╝╨╡╨╜╤В╨░
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "48000",
@@ -183,12 +186,12 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
         run_cmd(cmd, timeout=300)
         seg_paths.append(seg_path)
         progress = 30 + int((i + 1) / n * 55)
-        t.update({"log": f"Кодирую сегмент {i+1}/{n}…", "progress": progress})
+        t.update({"log": f"╨Ъ╨╛╨┤╨╕╤А╤Г╤О ╤Б╨╡╨│╨╝╨╡╨╜╤В {i+1}/{n}тАж", "progress": progress})
 
-    t.update({"log": "Склейка сегментов…", "progress": 87})
+    t.update({"log": "╨б╨║╨╗╨╡╨╣╨║╨░ ╤Б╨╡╨│╨╝╨╡╨╜╤В╨╛╨▓тАж", "progress": 87})
 
-    # ШАГ 3 — склейка через concat demuxer
-    # Все сегменты уже H264 MP4 с одинаковыми параметрами → просто copy
+    # ╨и╨Р╨У 3 тАФ ╤Б╨║╨╗╨╡╨╣╨║╨░ ╤З╨╡╤А╨╡╨╖ concat demuxer
+    # ╨Т╤Б╨╡ ╤Б╨╡╨│╨╝╨╡╨╜╤В╤Л ╤Г╨╢╨╡ H264 MP4 ╤Б ╨╛╨┤╨╕╨╜╨░╨║╨╛╨▓╤Л╨╝╨╕ ╨┐╨░╤А╨░╨╝╨╡╤В╤А╨░╨╝╨╕ тЖТ ╨┐╤А╨╛╤Б╤В╨╛ copy
     list_path = work_dir / "segments.txt"
     with open(list_path, "w") as f:
         for p in seg_paths:
@@ -199,20 +202,20 @@ def process_with_ffmpeg(task_id: str, input_path: Path, output_path: Path, param
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_path),
-        "-c", "copy",                       # без перекодирования — уже H264
+        "-c", "copy",                       # ╨▒╨╡╨╖ ╨┐╨╡╤А╨╡╨║╨╛╨┤╨╕╤А╨╛╨▓╨░╨╜╨╕╤П тАФ ╤Г╨╢╨╡ H264
         "-movflags", "+faststart",
         str(output_path),
     ]
     run_cmd(cmd, timeout=300)
 
-    # Чистим сегменты
+    # ╨з╨╕╤Б╤В╨╕╨╝ ╤Б╨╡╨│╨╝╨╡╨╜╤В╤Л
     for p in seg_paths:
         p.unlink(missing_ok=True)
     list_path.unlink(missing_ok=True)
 
     removed = total - out_dur
     t.update({
-        "status": "done", "progress": 100, "log": "Готово!",
+        "status": "done", "progress": 100, "log": "╨У╨╛╤В╨╛╨▓╨╛!",
         "original_duration": total, "output_duration": out_dur,
         "removed_sec": removed,
         "removed_pct": removed / total * 100 if total > 0 else 0,
