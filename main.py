@@ -226,9 +226,13 @@ def normalize_to_mkv(input_path: Path, work_dir: Path) -> Path:
 
     p1 = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     p2 = subprocess.Popen(encode_cmd, stdin=p1.stdout, stderr=subprocess.PIPE)
-    p1.stdout.close()
+    # ╨Э╨Х ╨╖╨░╨║╤А╤Л╨▓╨░╨╡╨╝ p1.stdout ╨┤╨╛ ╨╖╨░╨▓╨╡╤А╤И╨╡╨╜╨╕╤П p2 тАФ ╨╕╨╜╨░╤З╨╡ EOF ╤А╨░╨╜╤М╤И╨╡ ╨▓╤А╨╡╨╝╨╡╨╜╨╕
     _, err2 = p2.communicate(timeout=900)
-    p1.wait()
+    # ╨Ц╨┤╤С╨╝ ╨╖╨░╨▓╨╡╤А╤И╨╡╨╜╨╕╤П ╨┤╨╡╨║╨╛╨┤╨╡╤А╨░ ╨┐╨╛╤Б╨╗╨╡ ╤В╨╛╨│╨╛ ╨║╨░╨║ ╤Н╨╜╨║╨╛╨┤╨╡╤А ╨╖╨░╨║╨╛╨╜╤З╨╕╨╗
+    try:
+        p1.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        p1.kill()
     if p2.returncode != 0:
         raise RuntimeError("Pipe encode failed: " + err2.decode()[-1000:])
 
