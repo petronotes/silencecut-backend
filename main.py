@@ -139,33 +139,130 @@ def build_loud(silence, total, pad, max_keep):
 
 def normalize_to_mkv(input_path: Path, work_dir: Path) -> Path:
     """
-    ╨Я╨╡╤А╨╡╨║╨╛╨┤╨╕╤А╤Г╨╡╨╝ ╨▓╨╡╤Б╤М ╤Д╨░╨╣╨╗ ╨▓ MKV ╤Б keyframe ╨║╨░╨╢╨┤╤Г╤О ╤Б╨╡╨║╤Г╨╜╨┤╤Г.
-    baseline profile тАФ ╨╜╨╡╤В B-frames, seek ╨▓╤Б╨╡╨│╨┤╨░ ╨┐╨╛╨┐╨░╨┤╨░╨╡╤В ╨▓ IDR.
-    keyint=30 ╨┐╤А╨╕ 30fps = keyframe ╨║╨░╨╢╨┤╤Г╤О ╤Б╨╡╨║╤Г╨╜╨┤╤Г = seek ╤Б ╤В╨╛╤З╨╜╨╛╤Б╤В╤М╤О 1 ╤Б╨╡╨║.
-    ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╨╝ aac ╨▓ pcm_s16le ╨┤╨╗╤П ╨░╤Г╨┤╨╕╨╛ тАФ ╨▒╨╡╨╖ ╨┐╨╛╤В╨╡╤А╤М ╨┐╤А╨╕ ╨╜╨░╤А╨╡╨╖╨║╨╡.
+    ╨Э╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╤П ╤Б ╨╛╨▒╤Е╨╛╨┤╨╛╨╝ ╨▒╨╕╤В╤Л╤Е NAL-╨╡╨┤╨╕╨╜╨╕╤Ж Samsung.
+    -err_detect ignore_err + -ec deblock тАФ ╨┐╤А╨╛╨┐╤Г╤Б╨║╨░╨╡╨╝ ╨▒╨╕╤В╤Л╨╡ ╨║╨░╨┤╤А╤Л.
+    -skip_frame noref тАФ ╨╜╨╡ ╨┤╨╡╨║╨╛╨┤╨╕╤А╤Г╨╡╨╝ non-reference ╨║╨░╨┤╤А╤Л (╤Г╤Б╨║╨╛╤А╨╡╨╜╨╕╨╡).
+    ╨Ф╨▓╨░ ╨┐╤А╨╛╤Е╨╛╨┤╨░: ╤Б╨╜╨░╤З╨░╨╗╨░ ╨┐╤А╨╛╨▒╤Г╨╡╨╝ ╨▒╤Л╤Б╤В╤А╤Л╨╣, ╨┐╤А╨╕ ╨╛╤И╨╕╨▒╨║╨╡ тАФ ╤Б ignore_err.
     """
     norm_path = work_dir / "norm.mkv"
-    cmd = [
-        "ffmpeg", "-y",
-        "-fflags", "+genpts+igndts",
-        "-i", str(input_path),
-        # ╨Т╨╕╨┤╨╡╨╛: baseline ╨▒╨╡╨╖ B-frames, keyframe ╨║╨░╨╢╨┤╤Г╤О ╤Б╨╡╨║╤Г╨╜╨┤╤Г
+
+    base_output = [
         "-c:v", "libx264",
-        "-preset", "ultrafast",       # ╨╝╨░╨║╤Б╨╕╨╝╨░╨╗╤М╨╜╨░╤П ╤Б╨║╨╛╤А╨╛╤Б╤В╤М ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨░╤Ж╨╕╨╕
-        "-crf", "18",                  # ╨▓╤Л╤Б╨╛╨║╨╛╨╡ ╨║╨░╤З╨╡╤Б╤В╨▓╨╛, ╨┐╨╛╤В╨╡╤А╨╕ ╨╝╨╕╨╜╨╕╨╝╨░╨╗╤М╨╜╤Л
-        "-profile:v", "baseline",     # ╨╜╨╡╤В B-frames тЖТ seek ╨▓╤Б╨╡╨│╨┤╨░ ╤В╨╛╤З╨╜╤Л╨╣
+        "-preset", "ultrafast",
+        "-crf", "18",
+        "-profile:v", "baseline",
         "-level", "4.0",
-        "-x264-params", "keyint=30:min-keyint=30:scenecut=0",  # ╤Б╤В╤А╨╛╨│╨╕╨╣ keyint
+        "-x264-params", "keyint=30:min-keyint=30:scenecut=0",
         "-pix_fmt", "yuv420p",
         "-r", "30",
         "-vsync", "cfr",
-        # ╨Р╤Г╨┤╨╕╨╛: pcm ╨▒╨╡╨╖ ╨┐╨╛╤В╨╡╤А╤М тЖТ ╨╜╨╡╤В ╨░╤А╤В╨╡╤Д╨░╨║╤В╨╛╨▓ ╨┐╤А╨╕ ╨╜╨░╤А╨╡╨╖╨║╨╡
         "-c:a", "pcm_s16le",
         "-ar", "48000",
         "-ac", "2",
         str(norm_path),
     ]
-    run_cmd(cmd, timeout=900)
+
+    # ╨Я╨╛╨┐╤Л╤В╨║╨░ 1: ╤Б ignore_err ╨╕ deblock-╨▓╨╛╤Б╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡╨╝
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts+igndts+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "-ec", "deblock",
+        "-i", str(input_path),
+    ] + base_output
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    if proc.returncode == 0 and norm_path.exists() and norm_path.stat().st_size > 10000:
+        return norm_path
+
+    # ╨Я╨╛╨┐╤Л╤В╨║╨░ 2: ╤З╨╡╤А╨╡╨╖ pipe тАФ ╨┤╨╡╨║╨╛╨┤╨╕╤А╤Г╨╡╨╝ ╤З╨╡╤А╨╡╨╖ ffmpeg тЖТ pipe тЖТ ffmpeg encode
+    # ╨Я╨╛╨╗╨╜╨╛╤Б╤В╤М╤О ╨╛╨▒╤Е╨╛╨┤╨╕╤В ╨┐╤А╨╛╨▒╨╗╨╡╨╝╤Г ╨║╨╛╨╜╤В╨╡╨╣╨╜╨╡╤А╨░: ╤З╨╕╤В╨░╨╡╨╝ ╤Б╤Л╤А╤Л╨╡ ╨║╨░╨┤╤А╤Л ╤З╨╡╤А╨╡╨╖ stdout
+    norm_path.unlink(missing_ok=True)
+
+    decode_cmd = [
+        "ffmpeg",
+        "-fflags", "+genpts+igndts+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "-ec", "deblock",
+        "-i", str(input_path),
+        "-f", "rawvideo",
+        "-pix_fmt", "yuv420p",
+        "-r", "30",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "pipe:1",
+    ]
+
+    # ╨Я╨╛╨╗╤Г╤З╨░╨╡╨╝ ╤А╨░╨╖╨╝╨╡╤А ╨║╨░╨┤╤А╨░
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json",
+         "-show_streams", "-select_streams", "v:0", str(input_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    info = json.loads(probe.stdout)
+    vs = info["streams"][0]
+    w = int(vs.get("width", 1080))
+    h = int(vs.get("height", 1920))
+    # make even
+    w = w - (w % 2)
+    h = h - (h % 2)
+
+    encode_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "yuv420p",
+        "-video_size", f"{w}x{h}",
+        "-framerate", "30",
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "18",
+        "-profile:v", "baseline",
+        "-level", "4.0",
+        "-x264-params", "keyint=30:min-keyint=30:scenecut=0",
+        "-pix_fmt", "yuv420p",
+        "-an",                          # ╨░╤Г╨┤╨╕╨╛ ╨┤╨╛╨▒╨░╨▓╨╕╨╝ ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛
+        str(work_dir / "norm_vid.mkv"),
+    ]
+
+    p1 = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    p2 = subprocess.Popen(encode_cmd, stdin=p1.stdout, stderr=subprocess.PIPE)
+    p1.stdout.close()
+    _, err2 = p2.communicate(timeout=900)
+    p1.wait()
+    if p2.returncode != 0:
+        raise RuntimeError("Pipe encode failed: " + err2.decode()[-1000:])
+
+    # ╨Ш╨╖╨▓╨╗╨╡╨║╨░╨╡╨╝ ╨░╤Г╨┤╨╕╨╛ ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛
+    audio_path = work_dir / "norm_audio.mka"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-fflags", "+genpts+igndts",
+        "-i", str(input_path),
+        "-vn",
+        "-c:a", "pcm_s16le",
+        "-ar", "48000",
+        "-ac", "2",
+        str(audio_path),
+    ], capture_output=True, timeout=300)
+
+    # ╨Ю╨▒╤К╨╡╨┤╨╕╨╜╤П╨╡╨╝ ╨▓╨╕╨┤╨╡╨╛ + ╨░╤Г╨┤╨╕╨╛
+    merge_inputs = ["-i", str(work_dir / "norm_vid.mkv")]
+    if audio_path.exists():
+        merge_inputs += ["-i", str(audio_path)]
+
+    subprocess.run([
+        "ffmpeg", "-y",
+        *merge_inputs,
+        "-c", "copy",
+        str(norm_path),
+    ], capture_output=True, timeout=120)
+
+    (work_dir / "norm_vid.mkv").unlink(missing_ok=True)
+    audio_path.unlink(missing_ok=True)
+
+    if not norm_path.exists() or norm_path.stat().st_size < 10000:
+        raise RuntimeError("╨Э╨╡ ╤Г╨┤╨░╨╗╨╛╤Б╤М ╨╜╨╛╤А╨╝╨░╨╗╨╕╨╖╨╛╨▓╨░╤В╤М ╨▓╨╕╨┤╨╡╨╛. ╨д╨░╨╣╨╗ ╨┐╨╛╨▓╤А╨╡╨╢╨┤╤С╨╜.")
+
     return norm_path
 
 
